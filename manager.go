@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/mail"
 	"os"
 	"path/filepath"
@@ -12,10 +13,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/oauth2"
 	calendarapi "google.golang.org/api/calendar/v3"
+	driveapi "google.golang.org/api/drive/v3"
 	gmailapi "google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -24,7 +28,10 @@ var defaultGoogleScopes = []string{
 	gmailapi.GmailSendScope,
 	calendarapi.CalendarEventsScope,
 	calendarapi.CalendarReadonlyScope,
+	driveapi.DriveScope,
 }
+
+const maxDriveReadBytes = 512 * 1024
 
 // Client wraps one authenticated Google account.
 type Client struct {
@@ -32,6 +39,7 @@ type Client struct {
 	email       string
 	gmail       *gmailapi.Service
 	calendar    *calendarapi.Service
+	drive       *driveapi.Service
 	tokenSource oauth2.TokenSource
 }
 
@@ -735,6 +743,202 @@ func (m *Manager) RSVPEvent(ctx context.Context, account, calendarID, eventID, r
 	return client.calendar.Events.Update(calendarID, eventID, event).Context(ctx).Do()
 }
 
+// ListDriveFiles lists Drive files for one account.
+func (m *Manager) ListDriveFiles(ctx context.Context, account, query string, limit int, cursor string) (DriveFilesResult, error) {
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DriveFilesResult{}, err
+	}
+	limit = normalizeLimit(limit, 30, 200)
+	if strings.TrimSpace(query) == "" {
+		query = "trashed = false"
+	}
+	call := client.drive.Files.List().
+		Q(query).
+		PageSize(int64(limit)).
+		SupportsAllDrives(true).
+		IncludeItemsFromAllDrives(true).
+		Fields("nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,size,parents)")
+	if cursor != "" {
+		call = call.PageToken(cursor)
+	}
+	res, err := call.Context(ctx).Do()
+	if err != nil {
+		return DriveFilesResult{}, err
+	}
+	out := DriveFilesResult{
+		Items:      make([]DriveFileSummary, 0, len(res.Files)),
+		NextCursor: res.NextPageToken,
+	}
+	for _, file := range res.Files {
+		out.Items = append(out.Items, toDriveFileSummary(file))
+	}
+	return out, nil
+}
+
+// ReadDriveFile reads one Drive file's contents with safe size limits.
+func (m *Manager) ReadDriveFile(ctx context.Context, account, fileID, exportMIME string, maxBytes int) (DriveFileContent, error) {
+	if strings.TrimSpace(fileID) == "" {
+		return DriveFileContent{}, ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DriveFileContent{}, err
+	}
+	maxBytes = normalizeLimit(maxBytes, maxDriveReadBytes, 2*maxDriveReadBytes)
+	meta, err := client.drive.Files.Get(fileID).
+		SupportsAllDrives(true).
+		Fields("id,name,mimeType,modifiedTime,webViewLink,size,parents").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return DriveFileContent{}, err
+	}
+	if meta.MimeType == "application/vnd.google-apps.folder" {
+		return DriveFileContent{}, ErrInvalidInput
+	}
+
+	body, err := downloadDriveBody(ctx, client.drive, meta, exportMIME)
+	if err != nil {
+		return DriveFileContent{}, err
+	}
+	defer body.Close()
+
+	raw, truncated, err := readLimited(body, maxBytes)
+	if err != nil {
+		return DriveFileContent{}, err
+	}
+
+	out := DriveFileContent{
+		File:      toDriveFileSummary(meta),
+		Truncated: truncated,
+	}
+	if utf8.Valid(raw) {
+		out.Content = string(raw)
+		out.Encoding = "utf-8"
+		return out, nil
+	}
+	out.Content = base64.StdEncoding.EncodeToString(raw)
+	out.Encoding = "base64"
+	return out, nil
+}
+
+// CreateDriveFile creates a Drive file in one account.
+func (m *Manager) CreateDriveFile(ctx context.Context, account string, req DriveWriteRequest) (DriveFileSummary, error) {
+	if strings.TrimSpace(req.Name) == "" {
+		return DriveFileSummary{}, ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DriveFileSummary{}, err
+	}
+	metadata := &driveapi.File{
+		Name:    req.Name,
+		Parents: req.Parents,
+	}
+	if strings.TrimSpace(req.MimeType) != "" {
+		metadata.MimeType = strings.TrimSpace(req.MimeType)
+	}
+	uploadContentType := firstNonEmpty(strings.TrimSpace(req.MimeType), "text/plain")
+	if req.AsGoogleDoc {
+		metadata.MimeType = "application/vnd.google-apps.document"
+		uploadContentType = "text/plain"
+	}
+	call := client.drive.Files.Create(metadata).
+		SupportsAllDrives(true).
+		Fields("id,name,mimeType,modifiedTime,webViewLink,size,parents")
+	if strings.TrimSpace(req.Content) != "" {
+		call = call.Media(strings.NewReader(req.Content), googleapi.ContentType(uploadContentType))
+	}
+	created, err := call.Context(ctx).Do()
+	if err != nil {
+		return DriveFileSummary{}, err
+	}
+	return toDriveFileSummary(created), nil
+}
+
+// UpdateDriveFile updates metadata/content for one Drive file.
+func (m *Manager) UpdateDriveFile(ctx context.Context, account, fileID string, req DriveUpdateRequest) (DriveFileSummary, error) {
+	if strings.TrimSpace(fileID) == "" {
+		return DriveFileSummary{}, ErrInvalidInput
+	}
+	if strings.TrimSpace(req.Name) == "" && strings.TrimSpace(req.MimeType) == "" && strings.TrimSpace(req.Content) == "" {
+		return DriveFileSummary{}, ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DriveFileSummary{}, err
+	}
+	metadata := &driveapi.File{}
+	if req.Name != "" {
+		metadata.Name = req.Name
+	}
+	if req.MimeType != "" {
+		metadata.MimeType = req.MimeType
+	}
+	call := client.drive.Files.Update(fileID, metadata).
+		SupportsAllDrives(true).
+		Fields("id,name,mimeType,modifiedTime,webViewLink,size,parents")
+	if strings.TrimSpace(req.Content) != "" {
+		uploadContentType := firstNonEmpty(strings.TrimSpace(req.MimeType), "text/plain")
+		call = call.Media(strings.NewReader(req.Content), googleapi.ContentType(uploadContentType))
+	}
+	updated, err := call.Context(ctx).Do()
+	if err != nil {
+		return DriveFileSummary{}, err
+	}
+	return toDriveFileSummary(updated), nil
+}
+
+// DeleteDriveFile removes one Drive file.
+func (m *Manager) DeleteDriveFile(ctx context.Context, account, fileID string) error {
+	if strings.TrimSpace(fileID) == "" {
+		return ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return err
+	}
+	return client.drive.Files.Delete(fileID).SupportsAllDrives(true).Context(ctx).Do()
+}
+
+// UnifiedDriveSearch searches Drive across all authenticated accounts.
+func (m *Manager) UnifiedDriveSearch(ctx context.Context, query string, limit int) ([]AccountDriveFile, error) {
+	limit = normalizeLimit(limit, 30, 300)
+	accounts := m.authenticatedAccounts()
+	if len(accounts) == 0 {
+		return nil, ErrAccountNotAuthenticated
+	}
+
+	perAccount := limit
+	if len(accounts) > 1 {
+		perAccount = minInt(maxInt(limit/len(accounts), 5), 100)
+	}
+
+	out := make([]AccountDriveFile, 0, limit)
+	for _, ac := range accounts {
+		page, err := m.ListDriveFiles(ctx, ac.alias, query, perAccount, "")
+		if err != nil {
+			continue
+		}
+		for _, file := range page.Items {
+			out = append(out, AccountDriveFile{
+				Account: ac.alias,
+				Email:   ac.email,
+				File:    file,
+			})
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return driveModifiedUnix(out[i].File) > driveModifiedUnix(out[j].File)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // UnifiedInbox returns unread inbox messages across all accounts.
 func (m *Manager) UnifiedInbox(ctx context.Context, limit int) ([]AccountEmail, error) {
 	return m.UnifiedSearch(ctx, "in:inbox is:unread", limit)
@@ -926,11 +1130,16 @@ func newClient(
 	if err != nil {
 		return nil, fmt.Errorf("new calendar service: %w", err)
 	}
+	driveSvc, err := driveapi.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("new drive service: %w", err)
+	}
 	return &Client{
 		alias:       alias,
 		email:       email,
 		gmail:       gmailSvc,
 		calendar:    calSvc,
+		drive:       driveSvc,
 		tokenSource: persisting,
 	}, nil
 }
@@ -1159,6 +1368,67 @@ func eventStartUnix(event *calendarapi.Event) int64 {
 		}
 	}
 	return 0
+}
+
+func driveModifiedUnix(file DriveFileSummary) int64 {
+	if strings.TrimSpace(file.ModifiedTime) == "" {
+		return 0
+	}
+	parsed, err := time.Parse(time.RFC3339, file.ModifiedTime)
+	if err != nil {
+		return 0
+	}
+	return parsed.Unix()
+}
+
+func downloadDriveBody(ctx context.Context, svc *driveapi.Service, file *driveapi.File, exportMIME string) (io.ReadCloser, error) {
+	if file == nil || strings.TrimSpace(file.Id) == "" {
+		return nil, ErrInvalidInput
+	}
+	if strings.HasPrefix(file.MimeType, "application/vnd.google-apps.") {
+		mime := strings.TrimSpace(exportMIME)
+		if mime == "" {
+			mime = defaultDriveExportMIME(file.MimeType)
+		}
+		resp, err := svc.Files.Export(file.Id, mime).Context(ctx).Download()
+		if err != nil {
+			return nil, err
+		}
+		return resp.Body, nil
+	}
+	resp, err := svc.Files.Get(file.Id).SupportsAllDrives(true).Context(ctx).Download()
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+func defaultDriveExportMIME(googleMime string) string {
+	switch googleMime {
+	case "application/vnd.google-apps.document":
+		return "text/plain"
+	case "application/vnd.google-apps.spreadsheet":
+		return "text/csv"
+	case "application/vnd.google-apps.presentation":
+		return "text/plain"
+	default:
+		return "text/plain"
+	}
+}
+
+func readLimited(r io.Reader, max int) ([]byte, bool, error) {
+	if max <= 0 {
+		max = maxDriveReadBytes
+	}
+	reader := &io.LimitedReader{R: r, N: int64(max + 1)}
+	buf, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(buf) > max {
+		return buf[:max], true, nil
+	}
+	return buf, false, nil
 }
 
 func firstNonEmpty(values ...string) string {

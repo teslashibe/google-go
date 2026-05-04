@@ -34,5 +34,5 @@ func Google() Plugin {
 Notes:
 
 - If `config_path` is omitted, `google-go` defaults to `~/.google-mcp/config.json`.
-- Tool names are `google_gmail_*` and `google_calendar_*`.
+- Tool names are `google_gmail_*`, `google_calendar_*`, and `google_drive_*`.
 - The manager supports N accounts and unified cross-account tools out of the box.
