@@ -197,7 +197,10 @@ func (m *Manager) Authenticate(ctx context.Context, alias, email string) (Accoun
 	}
 
 	relToken := relativeTokenPath(m.configDir, tokenPath)
+
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	nextCfg := m.cfg
 	if nextCfg.Accounts == nil {
 		nextCfg.Accounts = map[string]AccountConfig{}
@@ -214,14 +217,10 @@ func (m *Manager) Authenticate(ctx context.Context, alias, email string) (Accoun
 	if nextCfg.DefaultAccount == "" {
 		nextCfg.DefaultAccount = alias
 	}
-	m.mu.Unlock()
 
 	if err := m.store.Save(nextCfg); err != nil {
 		return AccountInfo{}, err
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.cfg = nextCfg
 
 	oldEmail := ""
@@ -711,6 +710,9 @@ func (m *Manager) DeleteEvent(ctx context.Context, account, calendarID, eventID 
 
 // RSVPEvent updates the caller's attendee status on an event.
 func (m *Manager) RSVPEvent(ctx context.Context, account, calendarID, eventID, response string) (*calendarapi.Event, error) {
+	if strings.TrimSpace(eventID) == "" {
+		return nil, ErrInvalidInput
+	}
 	response = strings.ToLower(strings.TrimSpace(response))
 	switch response {
 	case "accepted", "declined", "tentative":
@@ -740,7 +742,9 @@ func (m *Manager) RSVPEvent(ctx context.Context, account, calendarID, eventID, r
 			Self:           true,
 		})
 	}
-	return client.calendar.Events.Update(calendarID, eventID, event).Context(ctx).Do()
+	return client.calendar.Events.Patch(calendarID, eventID, &calendarapi.Event{
+		Attendees: event.Attendees,
+	}).Context(ctx).Do()
 }
 
 // ListDriveFiles lists Drive files for one account.
@@ -1170,6 +1174,9 @@ func loadToken(path string) (*oauth2.Token, error) {
 	if err := readJSONFile(path, &tok); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(tok.AccessToken) == "" && strings.TrimSpace(tok.RefreshToken) == "" {
+		return nil, fmt.Errorf("token file %s has no access_token or refresh_token", path)
+	}
 	return &tok, nil
 }
 
@@ -1188,6 +1195,23 @@ func cloneToken(tok *oauth2.Token) *oauth2.Token {
 	return &out
 }
 
+var headerSanitizer = strings.NewReplacer("\r", "", "\n", "")
+
+func sanitizeHeader(v string) string {
+	return headerSanitizer.Replace(strings.TrimSpace(v))
+}
+
+func sanitizeAddresses(addrs []string) []string {
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		s := sanitizeHeader(a)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func buildRawMessage(req SendEmailRequest, extraHeaders map[string]string) (string, error) {
 	if len(req.To) == 0 {
 		return "", ErrInvalidInput
@@ -1197,18 +1221,19 @@ func buildRawMessage(req SendEmailRequest, extraHeaders map[string]string) (stri
 	}
 
 	var b strings.Builder
-	b.WriteString("To: " + strings.Join(req.To, ", ") + "\r\n")
+	b.WriteString("To: " + strings.Join(sanitizeAddresses(req.To), ", ") + "\r\n")
 	if len(req.Cc) > 0 {
-		b.WriteString("Cc: " + strings.Join(req.Cc, ", ") + "\r\n")
+		b.WriteString("Cc: " + strings.Join(sanitizeAddresses(req.Cc), ", ") + "\r\n")
 	}
 	if len(req.Bcc) > 0 {
-		b.WriteString("Bcc: " + strings.Join(req.Bcc, ", ") + "\r\n")
+		b.WriteString("Bcc: " + strings.Join(sanitizeAddresses(req.Bcc), ", ") + "\r\n")
 	}
-	b.WriteString("Subject: " + strings.TrimSpace(req.Subject) + "\r\n")
+	b.WriteString("Subject: " + sanitizeHeader(req.Subject) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	for k, v := range extraHeaders {
-		if strings.TrimSpace(v) != "" {
-			b.WriteString(k + ": " + strings.TrimSpace(v) + "\r\n")
+		sv := sanitizeHeader(v)
+		if sv != "" {
+			b.WriteString(sanitizeHeader(k) + ": " + sv + "\r\n")
 		}
 	}
 
