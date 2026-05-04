@@ -16,8 +16,18 @@ type listAccountsInput struct {
 	IncludeUnauthenticated bool `json:"include_unauthenticated,omitempty" jsonschema:"description=include aliases that exist but are not currently authenticated,default=true"`
 }
 
-func listAccounts(_ context.Context, m *google.Manager, _ listAccountsInput) (any, error) {
-	return m.ListAccounts(), nil
+func listAccounts(_ context.Context, m *google.Manager, in listAccountsInput) (any, error) {
+	all := m.ListAccounts()
+	if in.IncludeUnauthenticated {
+		return all, nil
+	}
+	out := make([]google.AccountInfo, 0, len(all))
+	for _, a := range all {
+		if a.Authenticated {
+			out = append(out, a)
+		}
+	}
+	return out, nil
 }
 
 func authenticate(ctx context.Context, m *google.Manager, in authenticateInput) (any, error) {

@@ -2,6 +2,7 @@ package google
 
 import (
 	calendarapi "google.golang.org/api/calendar/v3"
+	driveapi "google.golang.org/api/drive/v3"
 )
 
 // AccountInfo describes one configured account alias.
@@ -104,4 +105,67 @@ type AccountEvent struct {
 	CalendarID   string             `json:"calendar_id"`
 	CalendarName string             `json:"calendar_name,omitempty"`
 	Event        *calendarapi.Event `json:"event"`
+}
+
+// DriveFileSummary is a compact Google Drive file shape.
+type DriveFileSummary struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	MimeType     string   `json:"mime_type"`
+	ModifiedTime string   `json:"modified_time,omitempty"`
+	WebViewLink  string   `json:"web_view_link,omitempty"`
+	Size         int64    `json:"size,omitempty"`
+	Parents      []string `json:"parents,omitempty"`
+}
+
+// DriveFilesResult is a cursor-paginated Drive file page.
+type DriveFilesResult struct {
+	Items      []DriveFileSummary `json:"items"`
+	NextCursor string             `json:"next_cursor,omitempty"`
+}
+
+// DriveFileContent is the read response for one Drive file.
+type DriveFileContent struct {
+	File      DriveFileSummary `json:"file"`
+	Content   string           `json:"content"`
+	Encoding  string           `json:"encoding,omitempty"` // utf-8 or base64
+	Truncated bool             `json:"truncated,omitempty"`
+}
+
+// DriveWriteRequest is used for file create operations.
+type DriveWriteRequest struct {
+	Name        string   `json:"name"`
+	MimeType    string   `json:"mime_type,omitempty"`
+	Content     string   `json:"content,omitempty"`
+	Parents     []string `json:"parents,omitempty"`
+	AsGoogleDoc bool     `json:"as_google_doc,omitempty"`
+}
+
+// DriveUpdateRequest is used for file update operations.
+type DriveUpdateRequest struct {
+	Name     string `json:"name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	Content  string `json:"content,omitempty"`
+}
+
+// AccountDriveFile attaches a file to the account it came from.
+type AccountDriveFile struct {
+	Account string           `json:"account"`
+	Email   string           `json:"email"`
+	File    DriveFileSummary `json:"file"`
+}
+
+func toDriveFileSummary(file *driveapi.File) DriveFileSummary {
+	if file == nil {
+		return DriveFileSummary{}
+	}
+	return DriveFileSummary{
+		ID:           file.Id,
+		Name:         file.Name,
+		MimeType:     file.MimeType,
+		ModifiedTime: file.ModifiedTime,
+		WebViewLink:  file.WebViewLink,
+		Size:         file.Size,
+		Parents:      append([]string(nil), file.Parents...),
+	}
 }
