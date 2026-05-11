@@ -453,18 +453,45 @@ func (m *Manager) ForwardEmail(ctx context.Context, account, messageID string, t
 	return m.fetchSummary(ctx, client, sent.Id)
 }
 
-// CreateDraft creates a Gmail draft.
-func (m *Manager) CreateDraft(ctx context.Context, account string, req SendEmailRequest) (DraftResult, error) {
+// CreateDraft creates a Gmail draft. When threadID is non-empty, the draft is
+// threaded into the existing conversation with proper In-Reply-To/References.
+func (m *Manager) CreateDraft(ctx context.Context, account, threadID string, req SendEmailRequest) (DraftResult, error) {
 	client, err := m.Resolve(account)
 	if err != nil {
 		return DraftResult{}, err
 	}
-	raw, err := buildRawMessage(req, nil)
+
+	var extraHeaders map[string]string
+	threadID = strings.TrimSpace(threadID)
+	if threadID != "" {
+		thread, err := client.gmail.Users.Threads.Get("me", threadID).
+			Format("metadata").
+			MetadataHeaders("Message-ID", "References").
+			Context(ctx).
+			Do()
+		if err != nil {
+			return DraftResult{}, err
+		}
+		if len(thread.Messages) > 0 {
+			h := messageHeaders(thread.Messages[len(thread.Messages)-1])
+			references := strings.TrimSpace(strings.TrimSpace(h["References"]) + " " + strings.TrimSpace(h["Message-ID"]))
+			extraHeaders = map[string]string{
+				"In-Reply-To": h["Message-ID"],
+				"References":  references,
+			}
+		}
+	}
+
+	raw, err := buildRawMessage(req, extraHeaders)
 	if err != nil {
 		return DraftResult{}, err
 	}
+	msg := &gmailapi.Message{Raw: raw}
+	if threadID != "" {
+		msg.ThreadId = threadID
+	}
 	d, err := client.gmail.Users.Drafts.Create("me", &gmailapi.Draft{
-		Message: &gmailapi.Message{Raw: raw},
+		Message: msg,
 	}).Context(ctx).Do()
 	if err != nil {
 		return DraftResult{}, err
