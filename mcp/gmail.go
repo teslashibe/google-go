@@ -57,6 +57,7 @@ type gmailDraftInput struct {
 	Subject  string   `json:"subject" jsonschema:"description=draft subject,required"`
 	Body     string   `json:"body,omitempty" jsonschema:"description=plain text body"`
 	HTMLBody string   `json:"html_body,omitempty" jsonschema:"description=HTML body (used when body is empty)"`
+	ThreadID string   `json:"thread_id,omitempty" jsonschema:"description=thread ID to create the draft as a reply in (optional)"`
 }
 
 type accountOnlyInput struct {
@@ -125,7 +126,7 @@ func gmailForward(ctx context.Context, m *google.Manager, in gmailForwardInput) 
 }
 
 func gmailDraft(ctx context.Context, m *google.Manager, in gmailDraftInput) (any, error) {
-	return m.CreateDraft(ctx, in.Account, google.SendEmailRequest{
+	return m.CreateDraft(ctx, in.Account, in.ThreadID, google.SendEmailRequest{
 		To:       in.To,
 		Cc:       in.Cc,
 		Bcc:      in.Bcc,
