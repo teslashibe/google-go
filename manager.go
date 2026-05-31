@@ -65,6 +65,75 @@ type Manager struct {
 	emails   map[string]*managedAccount // email (lowercase) => account
 }
 
+// NewManagerFromInlineToken creates a single-account Manager from an OAuth2
+// token and the shared oauth-keys.json, without any filesystem config
+// directory. Used by the web OAuth callback flow where the token is stored
+// encrypted in the DB rather than on disk.
+func NewManagerFromInlineToken(oauthKeysPath string, token *oauth2.Token, alias, email string) (*Manager, error) {
+	oauthCfg, err := loadOAuth2Config(oauthKeysPath, defaultGoogleScopes)
+	if err != nil {
+		return nil, err
+	}
+	client, err := newClientStateless(context.Background(), oauthCfg, alias, email, token)
+	if err != nil {
+		return nil, err
+	}
+	entry := &managedAccount{alias: alias, email: email, client: client}
+	m := &Manager{
+		oauthConfig: oauthCfg,
+		cfg:         Config{DefaultAccount: alias, Accounts: map[string]AccountConfig{alias: {Email: email}}},
+		accounts:    map[string]*managedAccount{alias: entry},
+		emails:      map[string]*managedAccount{strings.ToLower(email): entry},
+	}
+	return m, nil
+}
+
+// newClientStateless is like newClient but does not persist token refreshes
+// to disk. Token persistence is handled by the credentials.Service layer.
+func newClientStateless(ctx context.Context, oauthCfg *oauth2.Config, alias, email string, token *oauth2.Token) (*Client, error) {
+	if oauthCfg == nil {
+		return nil, ErrOAuthKeysNotFound
+	}
+	if token == nil {
+		return nil, ErrAccountNotAuthenticated
+	}
+	ts := oauthCfg.TokenSource(ctx, token)
+	httpClient := oauth2.NewClient(ctx, ts)
+	gmailSvc, err := gmailapi.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("new gmail service: %w", err)
+	}
+	calSvc, err := calendarapi.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("new calendar service: %w", err)
+	}
+	driveSvc, err := driveapi.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("new drive service: %w", err)
+	}
+	return &Client{
+		alias:       alias,
+		email:       email,
+		gmail:       gmailSvc,
+		calendar:    calSvc,
+		drive:       driveSvc,
+		tokenSource: ts,
+	}, nil
+}
+
+// LoadOAuth2Config is the exported version of loadOAuth2Config for use by
+// external packages (e.g. the web OAuth callback handler).
+func LoadOAuth2Config(keysPath string, scopes []string) (*oauth2.Config, error) {
+	return loadOAuth2Config(keysPath, scopes)
+}
+
+// DefaultGoogleScopes returns the default scopes used by the Manager.
+func DefaultGoogleScopes() []string {
+	out := make([]string, len(defaultGoogleScopes))
+	copy(out, defaultGoogleScopes)
+	return out
+}
+
 // NewManager loads config and any already-authenticated accounts.
 func NewManager(configPath string) (*Manager, error) {
 	if strings.TrimSpace(configPath) == "" {
@@ -805,6 +874,26 @@ func (m *Manager) ListDriveFiles(ctx context.Context, account, query string, lim
 		out.Items = append(out.Items, toDriveFileSummary(file))
 	}
 	return out, nil
+}
+
+// GetDriveFile returns Drive metadata without downloading file contents.
+func (m *Manager) GetDriveFile(ctx context.Context, account, fileID string) (DriveFileSummary, error) {
+	if strings.TrimSpace(fileID) == "" {
+		return DriveFileSummary{}, ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DriveFileSummary{}, err
+	}
+	meta, err := client.drive.Files.Get(fileID).
+		SupportsAllDrives(true).
+		Fields("id,name,mimeType,modifiedTime,webViewLink,size,parents").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return DriveFileSummary{}, err
+	}
+	return toDriveFileSummary(meta), nil
 }
 
 // ReadDriveFile reads one Drive file's contents with safe size limits.
