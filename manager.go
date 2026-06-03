@@ -962,7 +962,10 @@ func (m *Manager) CreateDriveFile(ctx context.Context, account string, req Drive
 	uploadContentType := firstNonEmpty(strings.TrimSpace(req.MimeType), "text/plain")
 	if req.AsGoogleDoc {
 		metadata.MimeType = "application/vnd.google-apps.document"
-		uploadContentType = "text/plain"
+		// Keep the upload's content type as the SOURCE format (e.g. text/html)
+		// so Drive CONVERTS it into a formatted Doc. Forcing text/plain here
+		// made Drive ingest the HTML literally, so the Doc showed raw <h1>/<ul>
+		// tags instead of formatted headings/lists.
 	}
 	call := client.drive.Files.Create(metadata).
 		SupportsAllDrives(true).
@@ -993,8 +996,15 @@ func (m *Manager) UpdateDriveFile(ctx context.Context, account, fileID string, r
 	if req.Name != "" {
 		metadata.Name = req.Name
 	}
-	if req.MimeType != "" {
-		metadata.MimeType = req.MimeType
+	// req.MimeType is the SOURCE content type of the uploaded bytes (e.g.
+	// text/html), NOT a new file type. Only set it as the file's target
+	// mimeType when it's a Google-native type (a deliberate conversion
+	// target). Setting a source type like text/html as an existing Google
+	// Doc's mimeType turned it into a raw HTML file — which is why synced
+	// docs rendered literal HTML tags. Otherwise it's used solely as the
+	// upload media content type below, so Drive converts into the existing Doc.
+	if strings.HasPrefix(strings.TrimSpace(req.MimeType), "application/vnd.google-apps.") {
+		metadata.MimeType = strings.TrimSpace(req.MimeType)
 	}
 	call := client.drive.Files.Update(fileID, metadata).
 		SupportsAllDrives(true).
