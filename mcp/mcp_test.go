@@ -46,3 +46,33 @@ func TestToolsHaveGooglePrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestDocsAndCommentToolsAreRegistered(t *testing.T) {
+	wanted := map[string]bool{
+		"google_drive_comment_create":        false,
+		"google_drive_comments_list":         false,
+		"google_docs_get_metadata":           false,
+		"google_docs_replace_text":           false,
+		"google_docs_propose_change_comment": false,
+	}
+	for _, tool := range (googlemcp.Provider{}).Tools() {
+		if _, ok := wanted[tool.Name]; ok {
+			wanted[tool.Name] = true
+		}
+	}
+	for name, found := range wanted {
+		if !found {
+			t.Errorf("tool %q is not registered", name)
+		}
+	}
+}
+
+func TestDefaultScopesIncludeDocs(t *testing.T) {
+	const docsScope = "https://www.googleapis.com/auth/documents"
+	for _, scope := range google.DefaultGoogleScopes() {
+		if scope == docsScope {
+			return
+		}
+	}
+	t.Errorf("default OAuth scopes do not include %q", docsScope)
+}

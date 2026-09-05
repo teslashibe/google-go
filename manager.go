@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/oauth2"
 	calendarapi "google.golang.org/api/calendar/v3"
+	docsapi "google.golang.org/api/docs/v1"
 	driveapi "google.golang.org/api/drive/v3"
 	gmailapi "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/googleapi"
@@ -28,6 +29,7 @@ var defaultGoogleScopes = []string{
 	gmailapi.GmailSendScope,
 	calendarapi.CalendarEventsScope,
 	calendarapi.CalendarReadonlyScope,
+	docsapi.DocumentsScope,
 	driveapi.DriveScope,
 }
 
@@ -39,6 +41,7 @@ type Client struct {
 	email       string
 	gmail       *gmailapi.Service
 	calendar    *calendarapi.Service
+	docs        *docsapi.Service
 	drive       *driveapi.Service
 	tokenSource oauth2.TokenSource
 }
@@ -107,6 +110,10 @@ func newClientStateless(ctx context.Context, oauthCfg *oauth2.Config, alias, ema
 	if err != nil {
 		return nil, fmt.Errorf("new calendar service: %w", err)
 	}
+	docsSvc, err := docsapi.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("new docs service: %w", err)
+	}
 	driveSvc, err := driveapi.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("new drive service: %w", err)
@@ -116,6 +123,7 @@ func newClientStateless(ctx context.Context, oauthCfg *oauth2.Config, alias, ema
 		email:       email,
 		gmail:       gmailSvc,
 		calendar:    calSvc,
+		docs:        docsSvc,
 		drive:       driveSvc,
 		tokenSource: ts,
 	}, nil
@@ -296,7 +304,7 @@ func (m *Manager) Authenticate(ctx context.Context, alias, email string) (Accoun
 	if old := m.accounts[alias]; old != nil {
 		oldEmail = old.email
 	}
-	if oldEmail != "" && strings.ToLower(oldEmail) != strings.ToLower(email) {
+	if oldEmail != "" && !strings.EqualFold(oldEmail, email) {
 		delete(m.emails, strings.ToLower(oldEmail))
 	}
 
@@ -876,6 +884,118 @@ func (m *Manager) ListDriveFiles(ctx context.Context, account, query string, lim
 	return out, nil
 }
 
+// CreateDriveComment adds an unanchored comment to one Drive file.
+func (m *Manager) CreateDriveComment(ctx context.Context, account, fileID, content string) (DriveComment, error) {
+	if strings.TrimSpace(fileID) == "" || strings.TrimSpace(content) == "" {
+		return DriveComment{}, ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DriveComment{}, err
+	}
+	comment, err := client.drive.Comments.Create(fileID, &driveapi.Comment{Content: content}).
+		Fields("id,content,createdTime,modifiedTime,resolved,deleted,author(displayName)").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return DriveComment{}, err
+	}
+	return toDriveComment(comment), nil
+}
+
+// ListDriveComments lists comments on one Drive file.
+func (m *Manager) ListDriveComments(ctx context.Context, account, fileID string, limit int, cursor string, includeDeleted bool) (DriveCommentsResult, error) {
+	if strings.TrimSpace(fileID) == "" {
+		return DriveCommentsResult{}, ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DriveCommentsResult{}, err
+	}
+	limit = normalizeLimit(limit, 50, 100)
+	call := client.drive.Comments.List(fileID).
+		PageSize(int64(limit)).
+		IncludeDeleted(includeDeleted).
+		Fields("nextPageToken,comments(id,content,createdTime,modifiedTime,resolved,deleted,author(displayName))")
+	if cursor != "" {
+		call = call.PageToken(cursor)
+	}
+	res, err := call.Context(ctx).Do()
+	if err != nil {
+		return DriveCommentsResult{}, err
+	}
+	out := DriveCommentsResult{
+		Items:      make([]DriveComment, 0, len(res.Comments)),
+		NextCursor: res.NextPageToken,
+	}
+	for _, comment := range res.Comments {
+		out.Items = append(out.Items, toDriveComment(comment))
+	}
+	return out, nil
+}
+
+// GetDocumentMetadata returns identifiers needed for conflict-safe editing.
+func (m *Manager) GetDocumentMetadata(ctx context.Context, account, documentID string) (DocumentMetadata, error) {
+	if strings.TrimSpace(documentID) == "" {
+		return DocumentMetadata{}, ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DocumentMetadata{}, err
+	}
+	doc, err := client.docs.Documents.Get(documentID).
+		Fields("documentId,title,revisionId").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return DocumentMetadata{}, err
+	}
+	return DocumentMetadata{
+		DocumentID: doc.DocumentId,
+		Title:      doc.Title,
+		RevisionID: doc.RevisionId,
+	}, nil
+}
+
+// ReplaceDocumentText replaces every matching substring in a Google Doc.
+func (m *Manager) ReplaceDocumentText(ctx context.Context, account, documentID string, req DocumentReplaceTextRequest) (DocumentEditResult, error) {
+	if strings.TrimSpace(documentID) == "" || req.Find == "" {
+		return DocumentEditResult{}, ErrInvalidInput
+	}
+	client, err := m.Resolve(account)
+	if err != nil {
+		return DocumentEditResult{}, err
+	}
+	replace := &docsapi.ReplaceAllTextRequest{
+		ContainsText: &docsapi.SubstringMatchCriteria{
+			Text:      req.Find,
+			MatchCase: req.MatchCase,
+		},
+		ReplaceText: req.Replace,
+	}
+	if len(req.TabIDs) > 0 {
+		replace.TabsCriteria = &docsapi.TabsCriteria{TabIds: req.TabIDs}
+	}
+	update := &docsapi.BatchUpdateDocumentRequest{
+		Requests: []*docsapi.Request{{ReplaceAllText: replace}},
+	}
+	if strings.TrimSpace(req.RequiredRevisionID) != "" {
+		update.WriteControl = &docsapi.WriteControl{RequiredRevisionId: strings.TrimSpace(req.RequiredRevisionID)}
+	}
+	res, err := client.docs.Documents.BatchUpdate(documentID, update).Context(ctx).Do()
+	if err != nil {
+		return DocumentEditResult{}, err
+	}
+	out := DocumentEditResult{DocumentID: res.DocumentId}
+	if res.WriteControl != nil {
+		out.RevisionID = res.WriteControl.RequiredRevisionId
+	}
+	if len(res.Replies) > 0 && res.Replies[0] != nil && res.Replies[0].ReplaceAllText != nil {
+		out.OccurrencesChanged = res.Replies[0].ReplaceAllText.OccurrencesChanged
+	}
+	return out, nil
+}
+
 // GetDriveFile returns Drive metadata without downloading file contents.
 func (m *Manager) GetDriveFile(ctx context.Context, account, fileID string) (DriveFileSummary, error) {
 	if strings.TrimSpace(fileID) == "" {
@@ -1260,6 +1380,10 @@ func newClient(
 	if err != nil {
 		return nil, fmt.Errorf("new calendar service: %w", err)
 	}
+	docsSvc, err := docsapi.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("new docs service: %w", err)
+	}
 	driveSvc, err := driveapi.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("new drive service: %w", err)
@@ -1269,6 +1393,7 @@ func newClient(
 		email:       email,
 		gmail:       gmailSvc,
 		calendar:    calSvc,
+		docs:        docsSvc,
 		drive:       driveSvc,
 		tokenSource: persisting,
 	}, nil

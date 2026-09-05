@@ -43,6 +43,20 @@ type driveDeleteInput struct {
 	FileID  string `json:"file_id" jsonschema:"description=Drive file ID to delete,required"`
 }
 
+type driveCommentCreateInput struct {
+	Account string `json:"account" jsonschema:"description=account alias or email,required"`
+	FileID  string `json:"file_id" jsonschema:"description=Drive file ID including a Google Doc ID,required"`
+	Content string `json:"content" jsonschema:"description=plain-text document-level comment,required"`
+}
+
+type driveCommentsListInput struct {
+	Account        string `json:"account" jsonschema:"description=account alias or email,required"`
+	FileID         string `json:"file_id" jsonschema:"description=Drive file ID including a Google Doc ID,required"`
+	Limit          int    `json:"limit,omitempty" jsonschema:"description=comments per page,minimum=1,maximum=100,default=50"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"description=opaque next_cursor from prior call"`
+	IncludeDeleted bool   `json:"include_deleted,omitempty" jsonschema:"description=include deleted comments without their original content"`
+}
+
 type driveUnifiedSearchInput struct {
 	Query string `json:"query,omitempty" jsonschema:"description=Drive query syntax across all accounts"`
 	Limit int    `json:"limit,omitempty" jsonschema:"description=max merged results,minimum=1,maximum=300,default=30"`
@@ -85,6 +99,18 @@ func driveDelete(ctx context.Context, m *google.Manager, in driveDeleteInput) (a
 	return map[string]any{"ok": true, "file_id": in.FileID}, nil
 }
 
+func driveCommentCreate(ctx context.Context, m *google.Manager, in driveCommentCreateInput) (any, error) {
+	return m.CreateDriveComment(ctx, in.Account, in.FileID, in.Content)
+}
+
+func driveCommentsList(ctx context.Context, m *google.Manager, in driveCommentsListInput) (any, error) {
+	res, err := m.ListDriveComments(ctx, in.Account, in.FileID, in.Limit, in.Cursor, in.IncludeDeleted)
+	if err != nil {
+		return nil, err
+	}
+	return mcptool.PageOf(res.Items, res.NextCursor, in.Limit), nil
+}
+
 func driveUnifiedSearch(ctx context.Context, m *google.Manager, in driveUnifiedSearchInput) (any, error) {
 	return m.UnifiedDriveSearch(ctx, in.Query, in.Limit)
 }
@@ -119,6 +145,18 @@ var driveTools = []mcptool.Tool{
 		"Delete a Drive file by ID",
 		"DeleteDriveFile",
 		driveDelete,
+	),
+	mcptool.Define[*google.Manager, driveCommentCreateInput](
+		"google_drive_comment_create",
+		"Add a document-level comment to a Drive file or Google Doc",
+		"CreateDriveComment",
+		driveCommentCreate,
+	),
+	mcptool.Define[*google.Manager, driveCommentsListInput](
+		"google_drive_comments_list",
+		"List comments on a Drive file or Google Doc",
+		"ListDriveComments",
+		driveCommentsList,
 	),
 	mcptool.Define[*google.Manager, driveUnifiedSearchInput](
 		"google_drive_unified_search",

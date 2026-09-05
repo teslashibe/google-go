@@ -34,5 +34,7 @@ func Google() Plugin {
 Notes:
 
 - If `config_path` is omitted, `google-go` defaults to `~/.google-mcp/config.json`.
-- Tool names are `google_gmail_*`, `google_calendar_*`, and `google_drive_*`.
+- Tool names are `google_gmail_*`, `google_calendar_*`, `google_drive_*`, and `google_docs_*`.
+- Accounts authenticated before Docs support was added may need to be authenticated again to grant the Docs API scope.
+- Docs change proposals are document-level comments, not native suggestion-mode edits.
 - The manager supports N accounts and unified cross-account tools out of the box.
