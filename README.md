@@ -16,6 +16,8 @@ Manage N Google accounts (personal, work, side-project, …) from a single `*Man
 
 ## Install
 
+Use Go 1.25.13 or newer on a currently supported patched release.
+
 ```sh
 go get github.com/teslashibe/google-go
 ```
@@ -29,15 +31,23 @@ if err != nil {
 }
 
 // Authenticate a new account (opens browser for OAuth consent)
-if err := mgr.Authenticate(ctx, "work", "you@company.com"); err != nil {
+account, err := mgr.Authenticate(ctx, "work", "you@company.com")
+if err != nil {
     log.Fatal(err)
 }
+log.Printf("authenticated %s", account.Email)
 
 // Search across one account
-results, err := mgr.SearchEmail(ctx, "work", "in:inbox is:unread")
+results, err := mgr.SearchEmail(ctx, "work", "in:inbox is:unread", 20, "")
+if err != nil {
+	log.Fatal(err)
+}
 
 // Unified agenda across all accounts
-events, err := mgr.UnifiedAgenda(ctx, timeMin, timeMax)
+events, err := mgr.UnifiedAgenda(ctx, timeMin, timeMax, 100)
+if err != nil {
+	log.Fatal(err)
+}
 ```
 
 ## MCP Usage
