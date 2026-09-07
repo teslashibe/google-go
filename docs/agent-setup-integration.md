@@ -1,6 +1,8 @@
-# agent-setup integration snippet
+# Application integration example
 
-Use this snippet in `agent-setup/backend/internal/mcp/platforms/platforms.go` to wire `google-go` into the host registry.
+This is an example of wiring `google-go` into an application's MCP host
+registry. The `Plugin`, `mcp.PlatformBinding`, and `simpleValidator` types belong
+to the example host application; they are not exported by `google-go`.
 
 ```go
 import (
@@ -36,3 +38,8 @@ Notes:
 - If `config_path` is omitted, `google-go` defaults to `~/.google-mcp/config.json`.
 - Tool names are `google_gmail_*`, `google_calendar_*`, and `google_drive_*`.
 - The manager supports N accounts and unified cross-account tools out of the box.
+- `Manager.Authenticate` uses an installed/desktop OAuth client and a temporary
+  loopback callback opened in the user's browser. This is separate from
+  agent-go's hosted web OAuth callback flow, which obtains and stores a token in
+  the host application and constructs a manager with
+  `NewManagerFromInlineToken`.
