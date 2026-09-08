@@ -148,11 +148,69 @@ type DriveUpdateRequest struct {
 	Content  string `json:"content,omitempty"`
 }
 
+// DriveComment is a compact comment on a Drive file, including Google Docs.
+type DriveComment struct {
+	ID           string `json:"id"`
+	Content      string `json:"content,omitempty"`
+	CreatedTime  string `json:"created_time,omitempty"`
+	ModifiedTime string `json:"modified_time,omitempty"`
+	Resolved     bool   `json:"resolved,omitempty"`
+	Deleted      bool   `json:"deleted,omitempty"`
+	AuthorName   string `json:"author_name,omitempty"`
+}
+
+// DriveCommentsResult is a cursor-paginated comment page.
+type DriveCommentsResult struct {
+	Items      []DriveComment `json:"items"`
+	NextCursor string         `json:"next_cursor,omitempty"`
+}
+
+// DocumentReplaceTextRequest defines a structured Google Docs text replacement.
+type DocumentReplaceTextRequest struct {
+	Find               string   `json:"find"`
+	Replace            string   `json:"replace"`
+	MatchCase          bool     `json:"match_case,omitempty"`
+	TabIDs             []string `json:"tab_ids,omitempty"`
+	RequiredRevisionID string   `json:"required_revision_id,omitempty"`
+}
+
+// DocumentMetadata contains the identifiers needed for conflict-safe editing.
+type DocumentMetadata struct {
+	DocumentID string `json:"document_id"`
+	Title      string `json:"title,omitempty"`
+	RevisionID string `json:"revision_id"`
+}
+
+// DocumentEditResult reports the result of a structured Google Docs edit.
+type DocumentEditResult struct {
+	DocumentID         string `json:"document_id"`
+	RevisionID         string `json:"revision_id,omitempty"`
+	OccurrencesChanged int64  `json:"occurrences_changed"`
+}
+
 // AccountDriveFile attaches a file to the account it came from.
 type AccountDriveFile struct {
 	Account string           `json:"account"`
 	Email   string           `json:"email"`
 	File    DriveFileSummary `json:"file"`
+}
+
+func toDriveComment(comment *driveapi.Comment) DriveComment {
+	if comment == nil {
+		return DriveComment{}
+	}
+	out := DriveComment{
+		ID:           comment.Id,
+		Content:      comment.Content,
+		CreatedTime:  comment.CreatedTime,
+		ModifiedTime: comment.ModifiedTime,
+		Resolved:     comment.Resolved,
+		Deleted:      comment.Deleted,
+	}
+	if comment.Author != nil {
+		out.AuthorName = comment.Author.DisplayName
+	}
+	return out
 }
 
 func toDriveFileSummary(file *driveapi.File) DriveFileSummary {
