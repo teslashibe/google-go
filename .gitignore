@@ -25,3 +25,6 @@ Thumbs.db
 oauth-keys.json
 token.json
 credentials.json
+
+# Local Git worktrees
+/.worktrees/
