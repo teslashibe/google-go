@@ -1,6 +1,6 @@
 module github.com/teslashibe/google-go
 
-go 1.26.0
+go 1.26.10
 
 require (
 	github.com/teslashibe/mcptool v0.1.0
