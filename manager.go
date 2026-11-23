@@ -91,6 +91,83 @@ func NewManagerFromInlineToken(oauthKeysPath string, token *oauth2.Token, alias,
 	return m, nil
 }
 
+// AccountSource is one account whose OAuth tokens the host program holds.
+type AccountSource struct {
+	Alias       string
+	Email       string
+	TokenSource oauth2.TokenSource
+}
+
+// NewManagerFromTokenSources creates a Manager over accounts whose tokens the
+// host program holds and renews itself, with no config directory and nothing
+// written to disk. The first account is the default. Extra client options
+// (for example option.WithEndpoint) apply to every Google service after the
+// account's authenticated HTTP client.
+func NewManagerFromTokenSources(ctx context.Context, accounts []AccountSource, opts ...option.ClientOption) (*Manager, error) {
+	if len(accounts) == 0 {
+		return nil, ErrInvalidInput
+	}
+	m := &Manager{
+		accounts: map[string]*managedAccount{},
+		emails:   map[string]*managedAccount{},
+		cfg:      Config{Accounts: map[string]AccountConfig{}},
+	}
+	for _, a := range accounts {
+		alias := normalizeAlias(a.Alias)
+		email := strings.TrimSpace(a.Email)
+		if alias == "" || a.TokenSource == nil {
+			return nil, ErrInvalidInput
+		}
+		if _, dup := m.accounts[alias]; dup {
+			return nil, fmt.Errorf("%w: duplicate account alias %q", ErrInvalidInput, alias)
+		}
+		client, err := newClientFromSource(ctx, alias, email, a.TokenSource, opts)
+		if err != nil {
+			return nil, err
+		}
+		entry := &managedAccount{alias: alias, email: email, client: client}
+		m.accounts[alias] = entry
+		if email != "" {
+			m.emails[strings.ToLower(email)] = entry
+		}
+		m.cfg.Accounts[alias] = AccountConfig{Email: email}
+		if m.cfg.DefaultAccount == "" {
+			m.cfg.DefaultAccount = alias
+		}
+	}
+	return m, nil
+}
+
+func newClientFromSource(ctx context.Context, alias, email string, ts oauth2.TokenSource, extra []option.ClientOption) (*Client, error) {
+	httpClient := oauth2.NewClient(ctx, ts)
+	opts := append([]option.ClientOption{option.WithHTTPClient(httpClient)}, extra...)
+	gmailSvc, err := gmailapi.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("new gmail service: %w", err)
+	}
+	calSvc, err := calendarapi.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("new calendar service: %w", err)
+	}
+	docsSvc, err := docsapi.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("new docs service: %w", err)
+	}
+	driveSvc, err := driveapi.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("new drive service: %w", err)
+	}
+	return &Client{
+		alias:       alias,
+		email:       email,
+		gmail:       gmailSvc,
+		calendar:    calSvc,
+		docs:        docsSvc,
+		drive:       driveSvc,
+		tokenSource: ts,
+	}, nil
+}
+
 // newClientStateless is like newClient but does not persist token refreshes
 // to disk. Token persistence is handled by the credentials.Service layer.
 func newClientStateless(ctx context.Context, oauthCfg *oauth2.Config, alias, email string, token *oauth2.Token) (*Client, error) {
@@ -695,6 +772,21 @@ func (m *Manager) ListCalendars(ctx context.Context, account string) ([]Calendar
 	return out, nil
 }
 
+// ListEventsOption narrows a ListEvents call.
+type ListEventsOption func(*listEventsOptions)
+
+type listEventsOptions struct {
+	privateProperties []string
+}
+
+// WithPrivateProperty keeps only events whose private extended property key
+// equals value, as Google's privateExtendedProperty filter. Several are ANDed.
+func WithPrivateProperty(key, value string) ListEventsOption {
+	return func(o *listEventsOptions) {
+		o.privateProperties = append(o.privateProperties, key+"="+value)
+	}
+}
+
 // ListEvents lists events for one calendar.
 func (m *Manager) ListEvents(
 	ctx context.Context,
@@ -702,7 +794,20 @@ func (m *Manager) ListEvents(
 	timeMin, timeMax *time.Time,
 	limit int,
 	cursor string,
+	opts ...ListEventsOption,
 ) (CalendarEventsPage, error) {
+	var o listEventsOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	for _, filter := range o.privateProperties {
+		key, _, ok := strings.Cut(filter, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return CalendarEventsPage{}, ErrInvalidInput
+		}
+	}
 	client, err := m.Resolve(account)
 	if err != nil {
 		return CalendarEventsPage{}, err
@@ -713,6 +818,9 @@ func (m *Manager) ListEvents(
 		SingleEvents(true).
 		OrderBy("startTime").
 		MaxResults(int64(limit))
+	if len(o.privateProperties) > 0 {
+		call = call.PrivateExtendedProperty(o.privateProperties...)
+	}
 	if timeMin != nil && !timeMin.IsZero() {
 		call = call.TimeMin(timeMin.Format(time.RFC3339))
 	}

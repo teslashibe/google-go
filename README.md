@@ -76,6 +76,23 @@ All tools are prefixed by service:
 - `google_drive_*` — drive file operations (list/read/create/update/delete)
 - `google_docs_*` — structured Docs edits and comment-based change proposals
 
+Calendar event fields beyond the event payload:
+
+- `google_calendar_create_event` and `google_calendar_update_event` take
+  `transparency` (`opaque` for busy, `transparent` for free), `visibility`
+  (`default`, `public`, `private`) and `private_properties` (a string map set
+  as the event's private extended properties). These win over the same fields
+  in `event`; `private_properties` merges with any in `event`.
+- A `reminders` payload with `useDefault: false` is sent as such, so the
+  calendar's default reminders stay off.
+- `google_calendar_events` takes `private_property` filters, each `key=value`
+  as Google's `privateExtendedProperty` (an event must match all), and returns
+  each event's private properties in `extendedProperties.private`.
+
+A host program that holds and renews its own OAuth tokens builds a Manager
+with `google.NewManagerFromTokenSources`, one `oauth2.TokenSource` per account,
+with no config directory and nothing written to disk.
+
 `google_docs_propose_change_comment` records a proposed replacement as a
 document-level comment. It is intentionally not described as a native Google
 Docs suggestion: suggestion-mode writes require Google Developer Preview
