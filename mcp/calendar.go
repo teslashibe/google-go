@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	google "github.com/teslashibe/google-go"
@@ -20,6 +22,9 @@ type calendarEventsInput struct {
 	TimeMax    string `json:"time_max,omitempty" jsonschema:"description=RFC3339 upper time bound"`
 	Limit      int    `json:"limit,omitempty" jsonschema:"description=events per page,minimum=1,maximum=250,default=25"`
 	Cursor     string `json:"cursor,omitempty" jsonschema:"description=opaque next_cursor from prior call"`
+	// PrivateProperty filters as Google's privateExtendedProperty: each is
+	// key=value and an event must carry every one.
+	PrivateProperty []string `json:"private_property,omitempty" jsonschema:"description=private extended property filters as key=value; events must match all"`
 }
 
 type calendarGetEventInput struct {
@@ -36,16 +41,22 @@ type calendarFreeBusyInput struct {
 }
 
 type calendarCreateEventInput struct {
-	Account    string            `json:"account" jsonschema:"description=account alias or email,required"`
-	CalendarID string            `json:"calendar_id,omitempty" jsonschema:"description=calendar ID (defaults to primary)"`
-	Event      calendarapi.Event `json:"event" jsonschema:"description=Calendar event payload,required"`
+	Account           string            `json:"account" jsonschema:"description=account alias or email,required"`
+	CalendarID        string            `json:"calendar_id,omitempty" jsonschema:"description=calendar ID (defaults to primary)"`
+	Event             calendarapi.Event `json:"event" jsonschema:"description=Calendar event payload,required"`
+	Transparency      string            `json:"transparency,omitempty" jsonschema:"description=opaque (busy) or transparent (free),enum=opaque,enum=transparent"`
+	Visibility        string            `json:"visibility,omitempty" jsonschema:"description=default or public or private,enum=default,enum=public,enum=private"`
+	PrivateProperties map[string]string `json:"private_properties,omitempty" jsonschema:"description=private extended properties to set (string map)"`
 }
 
 type calendarUpdateEventInput struct {
-	Account    string            `json:"account" jsonschema:"description=account alias or email,required"`
-	CalendarID string            `json:"calendar_id,omitempty" jsonschema:"description=calendar ID (defaults to primary)"`
-	EventID    string            `json:"event_id" jsonschema:"description=event ID to update,required"`
-	Event      calendarapi.Event `json:"event" jsonschema:"description=partial event payload to patch,required"`
+	Account           string            `json:"account" jsonschema:"description=account alias or email,required"`
+	CalendarID        string            `json:"calendar_id,omitempty" jsonschema:"description=calendar ID (defaults to primary)"`
+	EventID           string            `json:"event_id" jsonschema:"description=event ID to update,required"`
+	Event             calendarapi.Event `json:"event" jsonschema:"description=partial event payload to patch,required"`
+	Transparency      string            `json:"transparency,omitempty" jsonschema:"description=opaque (busy) or transparent (free),enum=opaque,enum=transparent"`
+	Visibility        string            `json:"visibility,omitempty" jsonschema:"description=default or public or private,enum=default,enum=public,enum=private"`
+	PrivateProperties map[string]string `json:"private_properties,omitempty" jsonschema:"description=private extended properties to set (string map)"`
 }
 
 type calendarDeleteEventInput struct {
@@ -74,7 +85,15 @@ func calendarEvents(ctx context.Context, m *google.Manager, in calendarEventsInp
 	if err != nil {
 		return nil, err
 	}
-	res, err := m.ListEvents(ctx, in.Account, in.CalendarID, timeMin, timeMax, in.Limit, in.Cursor)
+	opts := make([]google.ListEventsOption, 0, len(in.PrivateProperty))
+	for _, filter := range in.PrivateProperty {
+		key, value, ok := strings.Cut(filter, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			return nil, invalidInput("private_property %q is not key=value", filter)
+		}
+		opts = append(opts, google.WithPrivateProperty(key, value))
+	}
+	res, err := m.ListEvents(ctx, in.Account, in.CalendarID, timeMin, timeMax, in.Limit, in.Cursor, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -107,12 +126,63 @@ func calendarFreeBusy(ctx context.Context, m *google.Manager, in calendarFreeBus
 
 func calendarCreateEvent(ctx context.Context, m *google.Manager, in calendarCreateEventInput) (any, error) {
 	event := in.Event
+	if err := applyEventFields(&event, in.Transparency, in.Visibility, in.PrivateProperties); err != nil {
+		return nil, err
+	}
 	return m.CreateEvent(ctx, in.Account, in.CalendarID, &event)
 }
 
 func calendarUpdateEvent(ctx context.Context, m *google.Manager, in calendarUpdateEventInput) (any, error) {
 	event := in.Event
+	if err := applyEventFields(&event, in.Transparency, in.Visibility, in.PrivateProperties); err != nil {
+		return nil, err
+	}
 	return m.UpdateEvent(ctx, in.Account, in.CalendarID, in.EventID, &event)
+}
+
+// applyEventFields sets the top-level transparency, visibility and private
+// properties on the event payload. They win over the same fields in event.
+func applyEventFields(event *calendarapi.Event, transparency, visibility string, private map[string]string) error {
+	switch transparency {
+	case "", "opaque", "transparent":
+	default:
+		return invalidInput("transparency %q must be opaque or transparent", transparency)
+	}
+	switch visibility {
+	case "", "default", "public", "private":
+	default:
+		return invalidInput("visibility %q must be default, public or private", visibility)
+	}
+	if transparency != "" {
+		event.Transparency = transparency
+	}
+	if visibility != "" {
+		event.Visibility = visibility
+	}
+	if len(private) > 0 {
+		props := &calendarapi.EventExtendedProperties{}
+		if event.ExtendedProperties != nil {
+			copied := *event.ExtendedProperties
+			props = &copied
+		}
+		merged := make(map[string]string, len(props.Private)+len(private))
+		for k, v := range props.Private {
+			merged[k] = v
+		}
+		for k, v := range private {
+			if strings.TrimSpace(k) == "" {
+				return invalidInput("private_properties has an empty key")
+			}
+			merged[k] = v
+		}
+		props.Private = merged
+		event.ExtendedProperties = props
+	}
+	return nil
+}
+
+func invalidInput(format string, args ...any) error {
+	return &mcptool.Error{Code: "invalid_input", Message: fmt.Sprintf(format, args...)}
 }
 
 func calendarDeleteEvent(ctx context.Context, m *google.Manager, in calendarDeleteEventInput) (any, error) {
@@ -135,7 +205,7 @@ var calendarTools = []mcptool.Tool{
 	),
 	mcptool.Define[*google.Manager, calendarEventsInput](
 		"google_calendar_events",
-		"List calendar events in a time window",
+		"List calendar events in a time window, optionally by private property",
 		"ListEvents",
 		calendarEvents,
 	),
@@ -153,13 +223,13 @@ var calendarTools = []mcptool.Tool{
 	),
 	mcptool.Define[*google.Manager, calendarCreateEventInput](
 		"google_calendar_create_event",
-		"Create a new Google Calendar event",
+		"Create a Google Calendar event with optional transparency, visibility and private properties",
 		"CreateEvent",
 		calendarCreateEvent,
 	),
 	mcptool.Define[*google.Manager, calendarUpdateEventInput](
 		"google_calendar_update_event",
-		"Patch an existing Google Calendar event",
+		"Patch a Google Calendar event, including transparency, visibility and private properties",
 		"UpdateEvent",
 		calendarUpdateEvent,
 	),
