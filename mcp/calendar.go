@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -152,6 +153,11 @@ func applyEventFields(event *calendarapi.Event, transparency, visibility string,
 	case "", "default", "public", "private":
 	default:
 		return invalidInput("visibility %q must be default, public or private", visibility)
+	}
+	// Go drops a false reminders.useDefault from the JSON, so a payload that
+	// turns the calendar's default reminders off would get them: send it.
+	if event.Reminders != nil && !event.Reminders.UseDefault && !slices.Contains(event.Reminders.ForceSendFields, "UseDefault") {
+		event.Reminders.ForceSendFields = append(event.Reminders.ForceSendFields, "UseDefault")
 	}
 	if transparency != "" {
 		event.Transparency = transparency

@@ -83,6 +83,8 @@ Calendar event fields beyond the event payload:
   (`default`, `public`, `private`) and `private_properties` (a string map set
   as the event's private extended properties). These win over the same fields
   in `event`; `private_properties` merges with any in `event`.
+- A `reminders` payload with `useDefault: false` is sent as such, so the
+  calendar's default reminders stay off.
 - `google_calendar_events` takes `private_property` filters, each `key=value`
   as Google's `privateExtendedProperty` (an event must match all), and returns
   each event's private properties in `extendedProperties.private`.

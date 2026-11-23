@@ -227,6 +227,18 @@ func TestCalendarCreateEventPrivateProperties(t *testing.T) {
 	}
 }
 
+func TestCalendarCreateEventSendsRemindersOff(t *testing.T) {
+	m, seen := newCalendarTestManager(t, eventEcho)
+	if _, err := invoke(t, m, "google_calendar_create_event", `{"account":"work","event":{"summary":"Busy","reminders":{"useDefault":false}}}`); err != nil {
+		t.Fatal(err)
+	}
+	req := onlyRequest(t, *seen)
+	reminders, _ := req.body["reminders"].(map[string]any)
+	if v, ok := reminders["useDefault"]; !ok || v != false {
+		t.Fatalf("body = %v, want reminders.useDefault false sent", req.body)
+	}
+}
+
 func TestCalendarUpdateEventTransparency(t *testing.T) {
 	m, seen := newCalendarTestManager(t, eventEcho)
 	if _, err := invoke(t, m, "google_calendar_update_event", `{"account":"work","calendar_id":"cal1","event_id":"e1",
